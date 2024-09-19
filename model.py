@@ -131,7 +131,7 @@ def _init_posterior(num_components: int, latent_dim: int):
     return alpha, A, b, beta, v_hat
 
 
-def _init_phi_gmm(num_components: torch.Tensor, latent_dim: int):
+def _init_phi_gmm(num_components: int, latent_dim: int):
     theta = _init_posterior(num_components, latent_dim)
     theta = niw.natural_to_standard(theta[1].clone(), theta[2].clone(), theta[3].clone(), theta[4].clone())
 
@@ -155,7 +155,6 @@ def _phi_gmm_to_nat_params(phi_gmm: torch.Tensor):
 
     eta2 = -0.5 * precision
     pi_k = F.log_softmax(pi_k_raw, dim=0)
-
     return (eta1, eta2, pi_k)
 
 
