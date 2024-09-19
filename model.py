@@ -62,23 +62,32 @@ class Model(nn.Module):
             (1 - step_size) * curr_param + step_size * param_star for (curr_param, param_star) in zip(theta, theta_star)
         ]
 
-    def compute_elbo(self, y, y_hat, theta, phi_tilde, x_k_samps, log_z_given_phi):
+    def elbo(
+        self,
+        y: torch.Tensor,
+        y_hat: torch.Tensor,
+        theta: torch.Tensor,
+        phi_tilde: torch.Tensor,
+        x_k_samples: torch.Tensor,
+        log_z_given_phi: torch.Tensor,
+    ):
+        N, K, S, L = x_k_samples.shape
 
-        beta_k, m_k, C_k, v_k = niw.natural_to_standard(*theta[1:])
-        mu, sigma = niw.expected_values((beta_k, m_k, C_k, v_k))
-        eta1_theta, eta2_theta = gaussian.standard_to_natural(mu, sigma)
+        # expected values of posterior gmm parameters
+        beta_k, m_k, cov_k, v_k = niw.natural_to_standard(*theta[1:])
         alpha_k = dirichlet.natural_to_standard(theta[0])
-        log_pi_given_theta = dirichlet.expected_log_pi(alpha_k)
+        mu, sigma = niw.expected_values((beta_k, m_k, cov_k, v_k))
+        eta1_theta, eta2_theta = gaussian.standard_to_natural(mu, sigma)
+        log_pi_theta = dirichlet.expected_log_pi(alpha_k)
 
+        # stop gradient
         eta1_theta = eta1_theta.detach()
         eta2_theta = eta2_theta.detach()
-        log_pi_given_theta = log_pi_given_theta.detach()
+        log_pi_theta = log_pi_theta.detach()
 
+        # recognition gmm parameters
         eta1_phi_tilde, eta2_phi_tilde = phi_tilde
-        N, K, L, _ = eta2_phi_tilde.shape
-        eta1_phi_tilde = torch.reshape(eta1_phi_tilde, (N, K, L))
-
-        N, K, S, L = x_k_samps.shape
+        eta1_phi_tilde = eta1_phi_tilde.squeeze()
 
         # log p(y | x, z)
         r_nk = torch.exp(log_z_given_phi)
@@ -86,14 +95,14 @@ class Model(nn.Module):
         neg_log_prob = _gaussian_log_prob(y, means_recon, var_recon, r_nk)
 
         # log q(x|z, y, phi) + log q(z|y, phi)
-        log_x_given_phi = gaussian.log_probability_nat_per_sample(x_k_samps, eta1_phi_tilde, eta2_phi_tilde)
+        log_x_given_phi = gaussian.log_probability_nat_per_sample(x_k_samples, eta1_phi_tilde, eta2_phi_tilde)
         log_numerator = log_x_given_phi + log_z_given_phi.unsqueeze(2)
 
         # log p(x| z, theta) + log p(z|theta)
-        log_x_given_theta = gaussian.log_probability_nat_per_sample(
-            x_k_samps, eta1_theta.unsqueeze(0).expand(N, -1, -1), eta2_theta.expand(N, -1, -1, -1)
-        )
-        log_denominator = log_x_given_theta + log_pi_given_theta.unsqueeze(0).unsqueeze(2)
+        eta1_theta = eta1_theta.unsqueeze(0).expand(N, -1, -1)
+        eta2_theta = eta2_theta.expand(N, -1, -1, -1)
+        log_x_given_theta = gaussian.log_probability_nat_per_sample(x_k_samples, eta1_theta, eta2_theta)
+        log_denominator = log_x_given_theta + log_pi_theta.unsqueeze(0).unsqueeze(2)
 
         kl_div = r_nk.unsqueeze(2) * (log_numerator - log_denominator)
         kl_div = torch.sum(kl_div, dim=1)
@@ -104,10 +113,6 @@ class Model(nn.Module):
 
     def init_posterior(self, num_components: int, latent_dim: int):
         return _init_posterior(num_components, latent_dim)
-
-    @property
-    def phi_gmm(self):
-        return (self.phi_mu, self.phi_cov, self.train_pi)
 
 
 def _compute_log_z_given_y(eta1_phi1, eta2_phi1, eta1_phi2, eta2_phi2, pi_phi2):
