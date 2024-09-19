@@ -125,7 +125,7 @@ def _compute_log_z_given_y(eta1_phi1, eta2_phi1, eta1_phi2, eta2_phi2, pi_phi2):
 
     w_eta2 = (w_eta2 + w_eta2.transpose(dim0=-1, dim1=-2)) / 2.0
     mu_eta2_1_eta2_2 = eta2_phi_tilde.inverse() @ eta1_phi2.unsqueeze(0).unsqueeze(-1).expand(B, -1, -1, 1)
-    w_eta1 = torch.einsum("nuj,nkuv->nkj", eta2_phi1, mu_eta2_1_eta2_2)  # Shape: NxKxL
+    w_eta1 = torch.einsum("nuj,nkuv->nkj", eta2_phi1, mu_eta2_1_eta2_2)
 
     mu_phi1, _ = gaussian.natural_to_standard(eta1_phi1, eta2_phi1)
     return gaussian.log_probability_nat(mu_phi1, w_eta1, w_eta2, pi_phi2)
