@@ -30,23 +30,23 @@ class Model(nn.Module):
 
     def forward(self, y: torch.Tensor):
         phi_enc = self.encoder.forward(y)
-        x_k_samples, log_z_given_y, phi_tilde = self.e_step(phi_enc, (self.phi_mu, self.phi_cov, self.train_pi))
+        x_k_samples, log_z_phi, phi_tilde = self.e_step(phi_enc, (self.phi_mu, self.phi_cov, self.train_pi))
         y_hat = self.decoder.forward(x_k_samples)
-        x_samples = _subsample_x(x_k_samples, log_z_given_y)[:, 0, :]
-        return y_hat, x_k_samples, x_samples, log_z_given_y, phi_tilde
+        x_samples = _subsample_x(x_k_samples, log_z_phi)[:, 0, :]
+        return y_hat, x_k_samples, x_samples, log_z_phi, phi_tilde
 
     def e_step(self, phi_enc: tuple[torch.Tensor], phi_gmm: torch.Tensor):
         eta1_phi_enc, eta2_phi_enc_diag = phi_enc
         eta2_phi_enc = torch.diag_embed(eta2_phi_enc_diag)
         eta1_phi_gmm, eta2_phi_gmm, pi_phi_gmm = _phi_gmm_to_nat_params(phi_gmm)
 
-        log_z_given_y = _compute_log_z_given_y(eta1_phi_enc, eta2_phi_enc, eta1_phi_gmm, eta2_phi_gmm, pi_phi_gmm)
+        log_z_phi = _compute_log_z_phi(eta1_phi_enc, eta2_phi_enc, eta1_phi_gmm, eta2_phi_gmm, pi_phi_gmm)
 
         eta2_phi_tilde = eta2_phi_enc.unsqueeze(1) + eta2_phi_gmm.unsqueeze(0)
         eta1_phi_tilde = (eta1_phi_enc.unsqueeze(1) + eta1_phi_gmm.unsqueeze(0)).unsqueeze(-1)
 
         x_k_samples = _sample_latents(eta1_phi_tilde, eta2_phi_tilde, self.num_samples)
-        return x_k_samples, log_z_given_y, (eta1_phi_tilde, eta2_phi_tilde)
+        return x_k_samples, log_z_phi, (eta1_phi_tilde, eta2_phi_tilde)
 
     def m_step(self, theta: tuple[torch.Tensor], x_samples: torch.Tensor, r_nk: torch.Tensor, step_size: float):
         beta_0, m_0, C_0, v_0 = niw.natural_to_standard(*theta[1:])
@@ -69,7 +69,7 @@ class Model(nn.Module):
         theta: torch.Tensor,
         phi_tilde: torch.Tensor,
         x_k_samples: torch.Tensor,
-        log_z_given_phi: torch.Tensor,
+        log_z_phi: torch.Tensor,
     ):
         N, K, S, L = x_k_samples.shape
 
@@ -90,13 +90,13 @@ class Model(nn.Module):
         eta1_phi_tilde = eta1_phi_tilde.squeeze()
 
         # log p(y | x, z)
-        r_nk = torch.exp(log_z_given_phi)
+        r_nk = torch.exp(log_z_phi)
         means_recon, var_recon = y_hat
         neg_log_prob = _gaussian_log_prob(y, means_recon, var_recon, r_nk)
 
         # log q(x|z, y, phi) + log q(z|y, phi)
         log_x_given_phi = gaussian.log_probability_nat_per_sample(x_k_samples, eta1_phi_tilde, eta2_phi_tilde)
-        log_numerator = log_x_given_phi + log_z_given_phi.unsqueeze(2)
+        log_numerator = log_x_given_phi + log_z_phi.unsqueeze(2)
 
         # log p(x| z, theta) + log p(z|theta)
         eta1_theta = eta1_theta.unsqueeze(0).expand(N, -1, -1)
@@ -115,29 +115,10 @@ class Model(nn.Module):
         return _init_posterior(num_components, latent_dim)
 
 
-def _compute_log_z_given_y(eta1_phi1, eta2_phi1, eta1_phi2, eta2_phi2, pi_phi2):
-    B, L = eta1_phi1.shape
-    K, _ = eta1_phi2.shape
-
-    eta2_phi_tilde = eta2_phi1.unsqueeze(1) + eta2_phi2.unsqueeze(0)
-    inv_eta2_eta2_sum_eta1 = eta2_phi_tilde.inverse() @ eta2_phi2.expand(B, -1, -1, -1)
-    w_eta2 = torch.einsum("nju,nkui->nkij", eta2_phi1, inv_eta2_eta2_sum_eta1)
-
-    w_eta2 = (w_eta2 + w_eta2.transpose(dim0=-1, dim1=-2)) / 2.0
-    mu_eta2_1_eta2_2 = eta2_phi_tilde.inverse() @ eta1_phi2.unsqueeze(0).unsqueeze(-1).expand(B, -1, -1, 1)
-    w_eta1 = torch.einsum("nuj,nkuv->nkj", eta2_phi1, mu_eta2_1_eta2_2)
-
-    mu_phi1, _ = gaussian.natural_to_standard(eta1_phi1, eta2_phi1)
-    return gaussian.log_probability_nat(mu_phi1, w_eta1, w_eta2, pi_phi2)
-
-
-def _gaussian_log_prob(y, param1_recon, param2_recon, weights):
-    M, K, S, L = param1_recon.shape
-
+def _gaussian_log_prob(y: torch.Tensor, mean: torch.Tensor, var: torch.Tensor, weights: torch.Tensor):
+    M, K, S, L = mean.shape
     y = y.unsqueeze(1).unsqueeze(1)
-    sample_mean = torch.einsum(
-        "nksd,nk->", torch.pow(y - param1_recon, 2) / param2_recon + torch.log(param2_recon + 1e-8), weights
-    )
+    sample_mean = torch.einsum("nksd,nk->", torch.pow(y - mean, 2) / var + torch.log(var + 1e-8), weights)
     return -0.5 * (sample_mean / S) - M * L / 2.0 * math.log(2.0 * math.pi)
 
 
@@ -160,7 +141,7 @@ def _init_posterior(num_components: int, latent_dim: int):
     return alpha, A, b, beta, v_hat
 
 
-def _init_phi_gmm(theta, num_components):
+def _init_phi_gmm(theta: torch.Tensor, num_components: torch.Tensor):
     theta = niw.natural_to_standard(theta[1].clone(), theta[2].clone(), theta[3].clone(), theta[4].clone())
 
     mu_k, sigma_k = niw.expected_values(theta)
@@ -170,7 +151,7 @@ def _init_phi_gmm(theta, num_components):
     return nn.Parameter(mu_k), nn.Parameter(L_k), nn.Parameter(F.log_softmax(pi_k, dim=0))
 
 
-def _phi_gmm_to_nat_params(phi_gmm):
+def _phi_gmm_to_nat_params(phi_gmm: torch.Tensor):
     eta1, L_k_raw, pi_k_raw = phi_gmm
 
     L_k = torch.tril(L_k_raw)
@@ -198,13 +179,35 @@ def _sample_latents(eta1: torch.Tensor, eta2: torch.Tensor, num_samples: int):
     return x_samples.permute(0, 1, 3, 2)
 
 
-def _subsample_x(x_k_samples, log_q_z_given_y):
+def _subsample_x(x_k_samples: torch.Tensor, log_q_z_given_phi: torch.Tensor):
     B, K, S, L = x_k_samples.shape
 
     n_idx = torch.arange(start=0, end=B).unsqueeze(1).repeat(1, S)
     s_idx = torch.arange(start=0, end=S).unsqueeze(0).repeat(B, 1)
 
-    m = torch.distributions.Categorical(logits=log_q_z_given_y)
+    m = torch.distributions.Categorical(logits=log_q_z_given_phi)
     z_samples = torch.transpose(m.sample([S]), dim0=1, dim1=0)
 
     return x_k_samples[[n_idx, z_samples, s_idx]]
+
+
+def _compute_log_z_phi(
+    eta1_phi1: torch.Tensor,
+    eta2_phi1: torch.Tensor,
+    eta1_phi2: torch.Tensor,
+    eta2_phi2: torch.Tensor,
+    pi_phi2: torch.Tensor,
+):
+    B, L = eta1_phi1.shape
+    K, _ = eta1_phi2.shape
+
+    eta2_phi_tilde = eta2_phi1.unsqueeze(1) + eta2_phi2.unsqueeze(0)
+    inv_eta2_eta2_sum_eta1 = eta2_phi_tilde.inverse() @ eta2_phi2.expand(B, -1, -1, -1)
+    w_eta2 = torch.einsum("nju,nkui->nkij", eta2_phi1, inv_eta2_eta2_sum_eta1)
+
+    w_eta2 = (w_eta2 + w_eta2.transpose(dim0=-1, dim1=-2)) / 2.0
+    mu_eta2_1_eta2_2 = eta2_phi_tilde.inverse() @ eta1_phi2.unsqueeze(0).unsqueeze(-1).expand(B, -1, -1, 1)
+    w_eta1 = torch.einsum("nuj,nkuv->nkj", eta2_phi1, mu_eta2_1_eta2_2)
+
+    mu_phi1, _ = gaussian.natural_to_standard(eta1_phi1, eta2_phi1)
+    return gaussian.log_probability_nat(mu_phi1, w_eta1, w_eta2, pi_phi2)
