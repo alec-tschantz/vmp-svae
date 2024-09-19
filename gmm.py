@@ -12,7 +12,7 @@ def update_Nk(r_nk):
 
 
 def update_xk(x, r_nk, N_k):
-    # Bishop eq 10.52; output shape = (K, D)
+    # Bishop eq 10.52
     x_k = torch.einsum("nk,nd->kd", r_nk, x)
     x_k_normed = x_k / N_k.unsqueeze(1)
     return torch.where(torch.isnan(x_k_normed), x_k, x_k_normed)
@@ -48,7 +48,6 @@ def update_mk(beta_0, m_0, N_k, x_k, beta_k):
 
 def update_Ck(C_0, x_k, N_k, m_0, beta_0, beta_k, S_k):
     # Bishop eq 10.62
-
     C = C_0 + N_k.unsqueeze(1).unsqueeze(2) * S_k
     Q0 = x_k - m_0
     q = torch.einsum("kd,ke->kde", Q0, Q0)
@@ -58,49 +57,6 @@ def update_Ck(C_0, x_k, N_k, m_0, beta_0, beta_k, S_k):
 def update_vk(v_0, N_k):
     # Bishop eq 10.63
     return (v_0 + N_k + 1).clone()
-
-
-def compute_expct_mahalanobis_dist(x, beta_k, m_k, P_k, v_k):
-    _, D = x.shape
-
-    dist = x.unsqueeze(1) - m_k.unsqueeze(0)  # shape=(N, K, D)
-    m = torch.einsum("k,nk->nk", v_k, torch.einsum("nkd,nkd->nk", dist, torch.einsum("kde,nke->nkd", P_k, dist)))
-    return torch.add(m, torch.reshape(D / beta_k, (1, -1)))  # shape=(1, K)
-
-
-def compute_expct_log_det_prec(v_k, P_k):
-    # Bishop eq 10.65
-    log_det_P = torch_utils.logdet(P_k)
-
-    K, D, _ = P_k.shape
-    D_log_2 = float(D) * torch.log(2.0)
-
-    i = torch.arange(D, dtype=torch.float32).unsqueeze(0)
-    sum_digamma = torch.sum(torch.digamma(0.5 * (v_k.unsqueeze(1) + 1.0 + i)), dim=1)
-
-    return (sum_digamma + D_log_2 + log_det_P).clone()
-
-
-def compute_log_pi(alpha_k):
-    # Bishop eq 10.66
-    alpha_hat = torch.sum(alpha_k)
-    return torch.subtract(torch.digamma(alpha_k), torch.digamma(alpha_hat))
-
-
-def compute_rnk(expct_log_pi, expct_log_det_cov, expct_dev):
-    log_rho_nk = expct_log_pi + 0.5 * expct_log_det_cov - 0.5 * expct_dev
-    rho_nk_save = torch.exp(log_rho_nk - torch.reshape(torch.max(log_rho_nk, dim=1), (-1, 1)))
-    rho_n_sum = torch.sum(rho_nk_save, dim=1)
-    return rho_nk_save / rho_n_sum.unsqueeze(1)
-
-
-def e_step(x, alpha_k, beta_k, m_k, P_k, v_k):
-    expct_dev = compute_expct_mahalanobis_dist(x, beta_k, m_k, P_k, v_k)  # Bishop eq 10.64
-    expct_log_det_cov = compute_expct_log_det_prec(v_k, P_k)  # Bishop eq 10.65
-    expct_log_pi = compute_log_pi(alpha_k)  # Bishop eq 10.66
-    r_nk = compute_rnk(expct_log_pi, expct_log_det_cov, expct_dev)  # Bishop eq 10.49
-
-    return r_nk, torch.exp(expct_log_pi)
 
 
 def m_step(x, r_nk, alpha_0, beta_0, m_0, C_0, v_0):
