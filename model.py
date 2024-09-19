@@ -14,26 +14,20 @@ from encoder import Encoder
 
 
 class Model(nn.Module):
-    def __init__(self, num_components, latent_dim, obs_dim, batch_dim, num_samples, encoder_layers, decoder_layers):
+    def __init__(self, num_components, latent_dim, num_samples, encoder_layers, decoder_layers):
         super().__init__()
-        self.encoder_layers = encoder_layers
-        self.decoder_layers = decoder_layers
         self.num_components = num_components
         self.num_samples = num_samples
         self.latent_dim = latent_dim
-        self.batch_dim = batch_dim
-        self.obs_dim = obs_dim
         self.encoder = Encoder(encoder_layers)
         self.decoder = Decoder(decoder_layers)
-        theta = _init_posterior(self.num_components, self.latent_dim)
-        self.phi_mu, self.phi_cov, self.train_pi = _init_phi_gmm(theta, self.num_components)
+        self.phi_mu, self.phi_cov, self.train_pi = _init_phi_gmm(num_components, latent_dim)
 
     def forward(self, y: torch.Tensor):
         phi_enc = self.encoder.forward(y)
-        x_k_samples, log_z_phi, phi_tilde = self.e_step(phi_enc, (self.phi_mu, self.phi_cov, self.train_pi))
-        y_hat = self.decoder.forward(x_k_samples)
-        x_samples = _subsample_x(x_k_samples, log_z_phi)[:, 0, :]
-        return y_hat, x_k_samples, x_samples, log_z_phi, phi_tilde
+        x_samples, log_z_phi, phi_tilde = self.e_step(phi_enc, (self.phi_mu, self.phi_cov, self.train_pi))
+        y_hat = self.decoder.forward(x_samples)
+        return y_hat, x_samples, log_z_phi, phi_tilde
 
     def e_step(self, phi_enc: tuple[torch.Tensor], phi_gmm: torch.Tensor):
         eta1_phi_enc, eta2_phi_enc_diag = phi_enc
@@ -45,13 +39,16 @@ class Model(nn.Module):
         eta2_phi_tilde = eta2_phi_enc.unsqueeze(1) + eta2_phi_gmm.unsqueeze(0)
         eta1_phi_tilde = (eta1_phi_enc.unsqueeze(1) + eta1_phi_gmm.unsqueeze(0)).unsqueeze(-1)
 
-        x_k_samples = _sample_latents(eta1_phi_tilde, eta2_phi_tilde, self.num_samples)
-        return x_k_samples, log_z_phi, (eta1_phi_tilde, eta2_phi_tilde)
+        x_samples = _sample_latents(eta1_phi_tilde, eta2_phi_tilde, self.num_samples)
+        return x_samples, log_z_phi, (eta1_phi_tilde, eta2_phi_tilde)
 
-    def m_step(self, theta: tuple[torch.Tensor], x_samples: torch.Tensor, r_nk: torch.Tensor, step_size: float):
+    def m_step(self, theta: tuple[torch.Tensor], x_samples: torch.Tensor, log_z_phi: torch.Tensor, step_size: float):
+        x_samples = _subsample_x(x_samples, log_z_phi)[:, 0, :]
+
         beta_0, m_0, C_0, v_0 = niw.natural_to_standard(*theta[1:])
         alpha_0 = dirichlet.natural_to_standard(theta[0])
 
+        r_nk = torch.exp(log_z_phi)
         alpha_k, beta_k, m_k, C_k, v_k, x_k, S_k = gmm.m_step(x_samples, r_nk, alpha_0, beta_0, m_0, C_0, v_0)
 
         A, b, beta, v_hat = niw.standard_to_natural(beta_k, m_k, C_k, v_k)
@@ -92,16 +89,16 @@ class Model(nn.Module):
         # log p(y | x, z)
         r_nk = torch.exp(log_z_phi)
         means_recon, var_recon = y_hat
-        neg_log_prob = _gaussian_log_prob(y, means_recon, var_recon, r_nk)
+        neg_log_prob = gaussian.log_prob(y, means_recon, var_recon, r_nk)
 
         # log q(x|z, y, phi) + log q(z|y, phi)
-        log_x_given_phi = gaussian.log_probability_nat_per_sample(x_k_samples, eta1_phi_tilde, eta2_phi_tilde)
+        log_x_given_phi = gaussian.natural_log_prob_per_sample(x_k_samples, eta1_phi_tilde, eta2_phi_tilde)
         log_numerator = log_x_given_phi + log_z_phi.unsqueeze(2)
 
         # log p(x| z, theta) + log p(z|theta)
         eta1_theta = eta1_theta.unsqueeze(0).expand(N, -1, -1)
         eta2_theta = eta2_theta.expand(N, -1, -1, -1)
-        log_x_given_theta = gaussian.log_probability_nat_per_sample(x_k_samples, eta1_theta, eta2_theta)
+        log_x_given_theta = gaussian.natural_log_prob_per_sample(x_k_samples, eta1_theta, eta2_theta)
         log_denominator = log_x_given_theta + log_pi_theta.unsqueeze(0).unsqueeze(2)
 
         kl_div = r_nk.unsqueeze(2) * (log_numerator - log_denominator)
@@ -113,13 +110,6 @@ class Model(nn.Module):
 
     def init_posterior(self, num_components: int, latent_dim: int):
         return _init_posterior(num_components, latent_dim)
-
-
-def _gaussian_log_prob(y: torch.Tensor, mean: torch.Tensor, var: torch.Tensor, weights: torch.Tensor):
-    M, K, S, L = mean.shape
-    y = y.unsqueeze(1).unsqueeze(1)
-    sample_mean = torch.einsum("nksd,nk->", torch.pow(y - mean, 2) / var + torch.log(var + 1e-8), weights)
-    return -0.5 * (sample_mean / S) - M * L / 2.0 * math.log(2.0 * math.pi)
 
 
 def _init_posterior(num_components: int, latent_dim: int):
@@ -141,7 +131,8 @@ def _init_posterior(num_components: int, latent_dim: int):
     return alpha, A, b, beta, v_hat
 
 
-def _init_phi_gmm(theta: torch.Tensor, num_components: torch.Tensor):
+def _init_phi_gmm(num_components: torch.Tensor, latent_dim: int):
+    theta = _init_posterior(num_components, latent_dim)
     theta = niw.natural_to_standard(theta[1].clone(), theta[2].clone(), theta[3].clone(), theta[4].clone())
 
     mu_k, sigma_k = niw.expected_values(theta)
@@ -210,4 +201,4 @@ def _compute_log_z_phi(
     w_eta1 = torch.einsum("nuj,nkuv->nkj", eta2_phi1, mu_eta2_1_eta2_2)
 
     mu_phi1, _ = gaussian.natural_to_standard(eta1_phi1, eta2_phi1)
-    return gaussian.log_probability_nat(mu_phi1, w_eta1, w_eta2, pi_phi2)
+    return gaussian.natural_log_prob(mu_phi1, w_eta1, w_eta2, pi_phi2)

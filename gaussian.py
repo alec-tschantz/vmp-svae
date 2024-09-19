@@ -1,3 +1,4 @@
+import math
 from math import pi
 
 import torch
@@ -19,7 +20,14 @@ def standard_to_natural(mu: torch.Tensor, sigma: torch.Tensor):
     return (torch.reshape(eta_1, mu.shape), eta_2)
 
 
-def log_probability_nat(x: torch.Tensor, eta1: torch.Tensor, eta2: torch.Tensor, weights: torch.Tensor):
+def log_prob(y: torch.Tensor, mean: torch.Tensor, var: torch.Tensor, weights: torch.Tensor):
+    M, K, S, L = mean.shape
+    y = y.unsqueeze(1).unsqueeze(1)
+    sample_mean = torch.einsum("nksd,nk->", torch.pow(y - mean, 2) / var + torch.log(var + 1e-8), weights)
+    return -0.5 * (sample_mean / S) - M * L / 2.0 * math.log(2.0 * pi)
+
+
+def natural_log_prob(x: torch.Tensor, eta1: torch.Tensor, eta2: torch.Tensor, weights: torch.Tensor):
     N, D = x.shape
 
     logprob = torch.einsum("nd,nkd->nk", x, eta1)
@@ -37,7 +45,7 @@ def log_probability_nat(x: torch.Tensor, eta1: torch.Tensor, eta2: torch.Tensor,
     return logprob - normalizer
 
 
-def log_probability_nat_per_sample(x_samples: torch.Tensor, eta1: torch.Tensor, eta2: torch.Tensor):
+def natural_log_prob_per_sample(x_samples: torch.Tensor, eta1: torch.Tensor, eta2: torch.Tensor):
     N, K, S, D = x_samples.shape
 
     log_normal = torch.einsum("nksd,nksd->nks", torch.einsum("nkij,nksj->nksi", eta2, x_samples), x_samples)
